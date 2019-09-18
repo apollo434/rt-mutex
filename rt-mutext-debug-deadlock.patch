@@ -1,0 +1,97 @@
+
+m: Jiwei Sun <jiwei.sun@windriver.com>
+Date: Wed, 17 Apr 2019 11:04:28 +0800
+Subject: [PATCH] locking/rtmutex: add debug support for showing the rt_mutex
+ lock owner
+
+If a task is hung by trying to hold a rt_mutex lock, the owner of the
+rt_mutex lock context is important for locating the root cause.
+Add log during bootup to check if patch is enabled.
+
+The function depends on
+CONFIG_DEBUG_RT_MUTEXES=y
+CONFIG_DETECT_HUNG_TASK=y
+
+Signed-off-by: Jiwei Sun <jiwei.sun@windriver.com>
+---
+ init/main.c              |  3 ++-
+ kernel/hung_task.c       | 11 +++++++++++
+ kernel/locking/rtmutex.c | 12 ++++++++++++
+ 3 files changed, 25 insertions(+), 1 deletion(-)
+
+diff --git a/init/main.c b/init/main.c
+index eeda6c2..3e9bad0 100644
+--- a/init/main.c
++++ b/init/main.c
+@@ -685,7 +685,7 @@ asmlinkage __visible void __init start_kernel(void)
+ 	}
+ 
+ 	ftrace_init();
+-
++        
+ 	/* Do the rest non-__init'ed, we're now alive */
+ 	rest_init();
+ }
+@@ -945,6 +945,7 @@ static int __ref kernel_init(void *unused)
+ 	/* need to finish all async __init code before freeing the memory */
+ 	async_synchronize_full();
+ 	free_initmem();
++        printk("Heng: debug LINCCM-4436 \n");
+ 	mark_rodata_ro();
+ 	system_state = SYSTEM_RUNNING;
+ 	numa_default_policy();
+diff --git a/kernel/hung_task.c b/kernel/hung_task.c
+index e0f90c2..8ca7b9e 100644
+--- a/kernel/hung_task.c
++++ b/kernel/hung_task.c
+@@ -72,6 +72,16 @@ static struct notifier_block panic_block = {
+ 	.notifier_call = hung_task_panic,
+ };
+ 
++extern struct task_struct *get_blocked_on_lock_task(struct task_struct *task);
++void debug_show_lock_owner(struct task_struct *task)
++{
++	struct task_struct *p;
++
++	p = get_blocked_on_lock_task(task);
++	if (p)
++		sched_show_task(p);
++}
++
+ static void check_hung_task(struct task_struct *t, unsigned long timeout)
+ {
+ 	unsigned long switch_count = t->nvcsw + t->nivcsw;
+@@ -118,6 +128,7 @@ static void check_hung_task(struct task_struct *t, unsigned long timeout)
+ 		" disables this message.\n");
+ 	sched_show_task(t);
+ 	debug_show_held_locks(t);
++	debug_show_lock_owner(t);
+ 
+ 	touch_nmi_watchdog();
+ 
+diff --git a/kernel/locking/rtmutex.c b/kernel/locking/rtmutex.c
+index 8e631ad..9173630 100644
+--- a/kernel/locking/rtmutex.c
++++ b/kernel/locking/rtmutex.c
+@@ -374,6 +374,18 @@ static inline struct rt_mutex *task_blocked_on_lock(struct task_struct *p)
+ 		p->pi_blocked_on->lock : NULL;
+ }
+ 
++struct task_struct *get_blocked_on_lock_task(struct task_struct *task)
++{
++#ifdef CONFIG_DEBUG_RT_MUTEXES
++	if (task && task->pi_blocked_on && task->pi_blocked_on->lock) {
++		printk("A rt mutex lock was waitting for by the task.\n");
++		return rt_mutex_owner(task->pi_blocked_on->lock);
++	} else
++		printk("No mutex lock was waiting for by the task.\n");
++#endif
++	return NULL;
++}
++
+ /*
+  * Adjust the priority chain. Also used for deadlock detection.
+  * Decreases task's usage by one - may thus free the task.
+-- 
+1.8.3.1
+
