@@ -232,7 +232,9 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 
 >>>>>>>>>>>> P >>>>>>>>>>>>>
 
-  raw_spin_lock_irqsave(&task->pi_lock, flags);
+  /*
+   * 调整current的优先级
+  */
   __rt_mutex_adjust_prio(task);
 	waiter->task = task;
 	waiter->lock = lock;
@@ -241,14 +243,156 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
   /* Get the top priority waiter on the lock */
 	if (rt_mutex_has_waiters(lock))
 		top_waiter = rt_mutex_top_waiter(lock);
+  /*
+   * 将waiter插入到lock的RB树中
+   */
 	rt_mutex_enqueue(lock, waiter);
 
   /*
-   * 将waiter插入到lock的RB树中
+   * 设置当前进程被阻塞在waiter上，如果后面获取锁成功的话，这个pi_blocked_on会被重新置为NULL
    */
 	task->pi_blocked_on = waiter;    
 
 >>>>>>>>>>>> P >>>>>>>>>>>>>
+
+  if (!owner)
+    retuen 0;
+
+>>>>>>>>>>>> no irq >>>>>>>>>>>>>
+/*
+ * 如果当前waiter成为lock的top waiter的话，调整owner的PI_waiter.因为进程的pi_waiters里面链入的是lock的top waiter
+ */
+if (waiter == rt_mutex_top_waiter(lock)) {
+  rt_mutex_dequeue_pi(owner, top_waiter);
+  rt_mutex_enqueue_pi(owner, waiter);
+
+  /*
+   * 调整owner的优先级，因为一个高优先级的waiter出现了。
+   */
+  __rt_mutex_adjust_prio(owner);
+
+  /*
+   * 如果owner同样被另外一把lock阻塞的话。那么需要遍历chain，调整优先级
+   */
+  if (owner->pi_blocked_on)
+    chain_walk = 1;
+} else if (rt_mutex_cond_detect_deadlock(waiter, chwalk)) {
+  chain_walk = 1;
+}
+
+  /* Store the lock on which owner is blocked or NULL */
+  /*
+   * 获取阻塞owner的lock。如果next_lock存在的话，那么需要一步一步往下去调整整个pi chain
+   */
+  next_lock = task_blocked_on_lock(owner);
+>>>>>>>>>>>> no irq >>>>>>>>>>>>>
+
+
+  /*
+  * Even if full deadlock detection is on, if the owner is not
+  * blocked itself, we can avoid finding this out in the chain
+  * walk.
+  */
+  if (!chain_walk || !next_lock)
+    return 0;
+
+    /*
+    * The owner can't disappear while holding a lock,
+    * so the owner struct is protected by wait_lock.
+    * Gets dropped in rt_mutex_adjust_prio_chain()!
+    */
+    get_task_struct(owner);
+
+>>>>>>>>>>>> P >>>>>>>>>>>>>
+
+    /*
+     * 遍历PI chain，调整优先级。关于pi chain，建议先看一下rt-mutex-design.txt大体了解一下。看了一百遍也没看透，shit，看代码继续缕吧。。。。。
+     */
+    res = rt_mutex_adjust_prio_chain(owner, chwalk, lock,
+         next_lock, waiter, task);
+}
+
+```
+
+### 最难懂的部分，看到吐血。。。 rt_mutex_adjust_prio_chain ####
+
+
+
+```
+保存下入参
+res = rt_mutex_adjust_prio_chain(owner, chwalk, lock,
+         next_lock, waiter, task);
+/*
+ * Adjust the priority chain. Also used for deadlock detection.
+ * Decreases task's usage by one - may thus free the task.
+ *
+ * @task:	the task owning the mutex (owner) for which a chain walk is
+ *		probably needed
+ * @chwalk:	do we have to carry out deadlock detection?
+ * @orig_lock:	the mutex (can be NULL if we are walking the chain to recheck
+ *		things for a task that has just got its priority adjusted, and
+ *		is waiting on a mutex)
+ * @next_lock:	the mutex on which the owner of @orig_lock was blocked before
+ *		we dropped its pi_lock. Is never dereferenced, only used for
+ *		comparison to detect lock chain changes.
+ * @orig_waiter: rt_mutex_waiter struct for the task that has just donated
+ *		its priority to the mutex owner (can be NULL in the case
+ *		depicted above or if the top waiter is gone away and we are
+ *		actually deboosting the owner)
+ * @top_task:	the current top waiter
+ *
+ * Returns 0 or -EDEADLK.
+ *
+ * Chain walk basics and protection scope
+ *
+ * [R] refcount on task
+ * [P] task->pi_lock held
+ * [L] rtmutex->wait_lock held
+ *
+ * Step	Description				Protected by
+ *	function arguments:
+ *	@task					[R]
+ *	@orig_lock if != NULL			@top_task is blocked on it
+ *	@next_lock				Unprotected. Cannot be
+ *						dereferenced. Only used for
+ *						comparison.
+ *	@orig_waiter if != NULL			@top_task is blocked on it
+ *	@top_task				current, or in case of proxy
+ *						locking protected by calling
+ *						code
+ *	again:
+ *	  loop_sanity_check();
+ *	retry:
+ * [1]	  lock(task->pi_lock);			[R] acquire [P]
+ * [2]	  waiter = task->pi_blocked_on;		[P]
+ * [3]	  check_exit_conditions_1();		[P]
+ * [4]	  lock = waiter->lock;			[P]
+ * [5]	  if (!try_lock(lock->wait_lock)) {	[P] try to acquire [L]
+ *	    unlock(task->pi_lock);		release [P]
+ *	    goto retry;
+ *	  }
+ * [6]	  check_exit_conditions_2();		[P] + [L]
+ * [7]	  requeue_lock_waiter(lock, waiter);	[P] + [L]
+ * [8]	  unlock(task->pi_lock);		release [P]
+ *	  put_task_struct(task);		release [R]
+ * [9]	  check_exit_conditions_3();		[L]
+ * [10]	  task = owner(lock);			[L]
+ *	  get_task_struct(task);		[L] acquire [R]
+ *	  lock(task->pi_lock);			[L] acquire [P]
+ * [11]	  requeue_pi_waiter(tsk, waiters(lock));[P] + [L]
+ * [12]	  check_exit_conditions_4();		[P] + [L]
+ * [13]	  unlock(task->pi_lock);		release [P]
+ *	  unlock(lock->wait_lock);		release [L]
+ *	  goto again;
+ */
+static int rt_mutex_adjust_prio_chain(struct task_struct *task,//orig_lock的owner
+				      enum rtmutex_chainwalk chwalk,
+				      struct rt_mutex *orig_lock,//当前进程尝试要获取的lock
+				      struct rt_mutex *next_lock,//owner尝试要获取的lock
+				      struct rt_mutex_waiter *orig_waiter,//当前进程的waiter
+				      struct task_struct *top_task)//当前进程
+{
+
 
 }
 
