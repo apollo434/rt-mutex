@@ -25,6 +25,15 @@ EXPORT_SYMBOL_GPL(rt_mutex_lock);
 ```
 
 ***rt_mutex_slowlock***
+
+本函数就是通过下面三个函数完成rtmutex的获取：
+
+1. trylocks_on_to_take_rt_mutex() 第一次尝试获取锁。
+
+2. 如果第一次尝试失败，调用take_blocks_on_rt_mutex()来将waiter入RB Tree 并完成PI Chain。
+
+3. 最后调用__rt_mutex_slowlock()在loop中去尝试获取锁，知道成功
+
 ```
 /*
  * Slow path lock function:
@@ -71,19 +80,23 @@ rt_mutex_slowlock(struct rt_mutex *lock, int state,
 		hrtimer_start_expires(&timeout->timer, HRTIMER_MODE_ABS);
 
   /*
-   * 通过此函数来准备waiter，并调整PI Chain，该过程会多次检查，并尝试获取rtmutex lock。
+   * 通过此函数来准备waiter，并调整PI Chain，该过程会多次检查，
+   * 并尝试获取rtmutex lock。
    */
 	ret = task_blocks_on_rt_mutex(lock, &waiter, current, chwalk);
 
   /*
-   * 函数走到这边，waiter就绪（在lock 以及owner的pi_waiters RB树中）并且PI chain的优先级调整及死锁检查已经完毕。下面准备让当前进程sleep wait
+   * 函数走到这边，waiter就绪（在lock 以及owner的pi_waiters RB树中）
+   * 并且PI chain的优先级调整及死锁检查已经完毕。下面准备让当前进程sleep wait
    */
 	if (likely(!ret))
 		/* sleep on the mutex */
 		ret = __rt_mutex_slowlock(lock, state, timeout, &waiter);
 
   /*
-   * 如果返回值不为0的话，那么就是被信号打断或者timeout时间到了。不是被unlock唤醒的，所以需要在rt_mutex_lock中删除waiter.如果是被unlock唤醒的话，waiter的清理工作由unlock函数完成。
+   * 如果返回值不为0的话，那么就是被信号打断或者timeout时间到了。
+   * 不是被unlock唤醒的，所以需要在rt_mutex_lock中删除waiter.
+   * 如果是被unlock唤醒的话，waiter的清理工作由unlock函数完成。
    */
 	if (unlikely(ret)) {
 		__set_current_state(TASK_RUNNING);
@@ -113,6 +126,65 @@ rt_mutex_slowlock(struct rt_mutex *lock, int state,
 
 	return ret;
 }
+
+```
+
+下面是设置Task的state为TASK_INTERRUPTIBLE的函数接口，本次只讨论slow path情况
+
+```
+/**
+ * rt_mutex_lock_interruptible - lock a rt_mutex interruptible
+ *
+ * @lock:		the rt_mutex to be locked
+ *
+ * Returns:
+ *  0		on success
+ * -EINTR	when interrupted by a signal
+ */
+int __sched rt_mutex_lock_interruptible(struct rt_mutex *lock)
+{
+	might_sleep();
+
+	return rt_mutex_fastlock(lock, TASK_INTERRUPTIBLE, rt_mutex_slowlock);
+}
+EXPORT_SYMBOL_GPL(rt_mutex_lock_interruptible);
+
+/*
+ * Futex variant with full deadlock detection.
+ */
+int rt_mutex_timed_futex_lock(struct rt_mutex *lock,
+			      struct hrtimer_sleeper *timeout)
+{
+	might_sleep();
+
+	return rt_mutex_timed_fastlock(lock, TASK_INTERRUPTIBLE, timeout,
+				       RT_MUTEX_FULL_CHAINWALK,
+				       rt_mutex_slowlock);
+}
+
+/**
+ * rt_mutex_timed_lock - lock a rt_mutex interruptible
+ *			the timeout structure is provided
+ *			by the caller
+ *
+ * @lock:		the rt_mutex to be locked
+ * @timeout:		timeout structure or NULL (no timeout)
+ *
+ * Returns:
+ *  0		on success
+ * -EINTR	when interrupted by a signal
+ * -ETIMEDOUT	when the timeout expired
+ */
+int
+rt_mutex_timed_lock(struct rt_mutex *lock, struct hrtimer_sleeper *timeout)
+{
+	might_sleep();
+
+	return rt_mutex_timed_fastlock(lock, TASK_INTERRUPTIBLE, timeout,
+				       RT_MUTEX_MIN_CHAINWALK,
+				       rt_mutex_slowlock);
+}
+EXPORT_SYMBOL_GPL(rt_mutex_timed_lock);
 
 ```
 
@@ -1146,7 +1218,7 @@ __rt_mutex_slowlock(struct rt_mutex *lock, int state,
 		debug_rt_mutex_print_deadlock(waiter);
 
     /*
-     * schedule 反复进入循环体，知道获取lock才break
+     * schedule 反复进入循环体，直到获取lock才break
      */
 		schedule();
 
