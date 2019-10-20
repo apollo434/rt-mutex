@@ -912,6 +912,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
   /*
    * 获取current要获取的lock的owner对应的waiter记录的
    * 阻塞这个owner的lock中的top_waiter，起个名字叫prerequeue_top_waiter
+   * 这个top_waiter在这里只是用来预存的，后面会用到
    */
 	/*
 	 * Store the current top waiter before doing the requeue
@@ -921,7 +922,10 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	prerequeue_top_waiter = rt_mutex_top_waiter(lock);
 
   /*
-  */
+   * 走到这里，说明已经存在一个current要获取的lock的owner对应
+   * 的waiter记录的阻塞这个owner的lock存在，并且prio还不一样
+   * （翻看前面的第一部分的判断），那么需要对rtmutex lock的RB Tree进行更新。
+   */
 	/* [7] Requeue the waiter in the lock waiter tree. */
 	rt_mutex_dequeue(lock, waiter);
 	waiter->prio = task->prio;
@@ -931,6 +935,11 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
 	put_task_struct(task);
 
+  /*
+   * current要获取的lock的owner中的waiter记录的阻塞这个owner
+   * 的lock的owner，这个时候不存在了，那么说明这个lock已经释放了，
+   * 那么唤醒这个lock的top waiter
+   */
 	/*
 	 * [9] check_exit_conditions_3 protected by lock->wait_lock.
 	 *
@@ -950,11 +959,28 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		return 0;
 	}
 
+
+```
+
+**第四部分：调整Task对应的RB Tree等相关信息**
+
+```
+  /*
+   * 前面更新了rtmutex lock的RB Tree等信息，那么下面是更新Task的信息，
+   * 获取current要获取的lock的owner中的waiter记录的阻塞这个owner的lock的owner
+   */
 	/* [10] Grab the next task, i.e. the owner of @lock */
 	task = rt_mutex_owner(lock);
 	get_task_struct(task);
 	raw_spin_lock_irqsave(&task->pi_lock, flags);
 
+  /*
+   * 如果（current要获取的lock的owner中的waiter记录的阻塞这个owner的
+   * lock的top waiter） == （current要获取的lock的owner，阻塞它的waiter），
+   * 那么说明当前的waiter才是真正的top waiter，需要更新Task里面的RB Tree，
+   * 将之前的prerequeue_top_waiter移除，将这个waiter移入，这个属于Boost
+   * the owner，优先级提高了
+   */
 	/* [11] requeue the pi waiters if necessary */
 	if (waiter == rt_mutex_top_waiter(lock)) {
 		/*
@@ -967,6 +993,14 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		rt_mutex_enqueue_pi(task, waiter);
 		__rt_mutex_adjust_prio(task);
 
+    /*
+     * 如果（current要获取的lock的owner，阻塞它的waiter） ==
+     * （current要获取的lock的owner对应的waiter记录的阻塞这个owner
+     * 的lock中的top_waiter）.
+     * 说明什么呢？说明该current要获取的lock的owner，阻塞它的waiter，
+     * 它本来就是top waiter，但很巧，这个top waiter获得了阻塞它的lock，
+     * 那么需就需要重新调整优先级，这个属于Deboost the owner，优先级降低了
+     */
 	} else if (prerequeue_top_waiter == waiter) {
 		/*
 		 * The waiter was the top waiter on the lock, but is
@@ -989,6 +1023,10 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		 */
 	}
 
+  /*
+   * 获取next_lock， 这个lock是什么呢？是阻塞current要获取的lock的
+   * owner中的waiter记录的阻塞这个owner的lock的owner <==== 阻塞这个owner的lock
+   */
 	/*
 	 * [12] check_exit_conditions_4() protected by task->pi_lock
 	 * and lock->wait_lock. The actual decisions are made after we
@@ -1000,6 +1038,11 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 * task->pi_lock next_lock cannot be dereferenced anymore.
 	 */
 	next_lock = task_blocked_on_lock(task);
+
+  /*
+   * 获取current要获取的lock的owner中的waiter记录的阻塞这个owner的
+   * lock中的top waiter
+   */
 	/*
 	 * Store the top waiter of @lock for the end of chain walk
 	 * decision below.
@@ -1010,6 +1053,9 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
 	raw_spin_unlock(&lock->wait_lock);
 
+  /*
+   * 下面进行下一次PI Chain的walk
+   */
 	/*
 	 * Make the actual exit decisions [12], based on the stored
 	 * values.
