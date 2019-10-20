@@ -123,6 +123,10 @@ rt_mutex_slowlock(struct rt_mutex *lock, int state,
 1）lock没有waiter，当前Task获取rtmutex lock，并返回1。
 
 2）lock上有waiter，当前Task没有获取rtmutex lock，并返回0.
+
+整个函数共分下面几种情况：
+
+
 ```
 /*
  * Try to take an rt-mutex
@@ -199,7 +203,10 @@ static int try_to_take_rt_mutex(struct rt_mutex *lock, struct task_struct *task,
 
 	} else {
     /*
-     *
+     * 如果waiter == NULL，即在rt_mutex_slowlock调用时传参
+     * 当前lock没有owner（前面if (rt_mutex_owner(lock))已经判断）并且当前Task不是top_waiter,通过task->prio >= top_waiter->prio，来判断，prio越小，优先级越高，则当前
+     * Task不是top_waiter，无法获取lock
+     * bin
      */
 		/*
 		 * If the lock has waiters already we check whether @task is
@@ -230,6 +237,10 @@ static int try_to_take_rt_mutex(struct rt_mutex *lock, struct task_struct *task,
 			 * and we have no waiters to enqueue in @task
 			 * pi waiters tree.
 			 */
+      /*
+       * 即没有waiter，又没有owner，而当前Task的waiter也是NULL，即task->pi_blocked_on is NULL。
+       * 那还想什么，开心的获取lock吧
+       */
 			goto takeit;
 		}
 	}
