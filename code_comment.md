@@ -477,3 +477,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 }
 
 ```
+
+***rt_mutex_adjust_prio_chain***
+
+根据之前的记录，这部分函数分成三个部分，分别进行分析：
