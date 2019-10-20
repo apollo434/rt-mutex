@@ -485,13 +485,15 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 
 ***rt_mutex_adjust_prio_chain***
 
-根据之前的记录，这部分函数分成三个部分，分别进行分析：
+根据之前的记录，这部分函数分成四个部分，分别进行分析：
 
 1. 判断是否还需要PI Chain.
 
-2. 调整rtmutex的lock对应的RB Tree等相关信息.
+2. 死锁检测
 
-3. 调整Task对应的RB Tree等相关信息.
+3. 调整rtmutex的lock对应的RB Tree等相关信息.
+
+4. 调整Task对应的RB Tree等相关信息.
 
 **NOTE1**
 
@@ -525,6 +527,8 @@ The chain would be:
 **NOTE3**
 
 对于PI Chain的walk可能是从底开始，也可能是从中间开始
+
+**第一部分：判断是否还需要PI Chain**
 ```
 /*
  * Adjust the priority chain. Also used for deadlock detection.
@@ -676,7 +680,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
    * 下面是本函数出现的局部变量：
    * 本函数局部变量 ============> 对应的内容
    * top_waiter ============> current对应的waiter
-   * waiter ============> current要获取的lock的owner中的waiter
+   * waiter ============> current要获取的lock的owner，阻塞它的waiter
    * lock ============> current要获取的lock的owner中的waiter记录的阻塞这个owner的lock
    */
   	/*
@@ -706,7 +710,8 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 * the previous owner of the lock might have released the lock.
 	 */
   /*
-   *
+   * 如果current对应的waiter存在，同时current要获取的lock的owner却不存在，即当前
+   * 的current不在被owner所阻塞，所以，无需PI Chain，而是要尝试获取lock了
    */
 	if (orig_waiter && !rt_mutex_owner(orig_lock))
 		goto out_unlock_pi;
@@ -720,6 +725,11 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 * We stored the lock on which @task was blocked in @next_lock,
 	 * so we can detect the chain change.
 	 */
+  /*
+   * 如果阻塞owner的lock 不等于 current要获取的lock的owner中的waiter的lock，
+   * 本来两个lock是一个，却不想等，很可能此时owner不再被阻塞，或者，阻塞它的锁从
+   * 一个锁变成另一个锁，那么就没必要继续进行PI Chain了
+   */
 	if (next_lock != waiter->lock)
 		goto out_unlock_pi;
 
@@ -729,6 +739,11 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 * mode!
 	 */
 	if (top_waiter) {
+    /*
+     * 如果 current对应的waiter依然存在，但current要获取的lock的owner的
+     * pi waiter却不存在，这就意味着owner没有RB Tree了，那么owner不再
+     * 阻塞current，无需进行PI Chain
+     */
 		if (!task_has_pi_waiters(task))
 			goto out_unlock_pi;
 		/*
@@ -739,6 +754,12 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		 */
 		if (top_waiter != task_top_pi_waiter(task)) {
 			if (!detect_deadlock)
+      /*
+       * 如果top_waiter即current对应的waiter 不等于 current要
+       * 获取的lock的owner的top waiter，即最left的waiter，如果
+       * 开启了死锁检测，则记录下requeue = falese，如果没有开启，
+       * 则无需进行PI Chain，直接返回
+       */
 				goto out_unlock_pi;
 			else
 				requeue = false;
@@ -752,6 +773,12 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 * enabled we continue, but stop the requeueing in the chain
 	 * walk.
 	 */
+  /*
+   * 当 （current要获取的lock的owner，阻塞它的waiter）对应的prio
+   * 与current要获取的lock的owner的prio相等，那么说明在没有开启死
+   * 锁检测的情况下，是无需进行PI Chain，因为优先级没变化，如果开启
+   * 了死锁检测则requeue = false
+   */
 	if (waiter->prio == task->prio) {
 		if (!detect_deadlock)
 			goto out_unlock_pi;
@@ -774,6 +801,12 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		goto retry;
 	}
 
+```
+
+
+**第二部分：这部分是死锁检查**
+
+```
 	/*
 	 * [6] check_exit_conditions_2() protected by task->pi_lock and
 	 * lock->wait_lock.
@@ -790,12 +823,22 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		goto out_unlock_pi;
 	}
 
+
+```
+
+**第三部分：调整rtmutex的lock对应的RB Tree等相关信息**
+
+```
 	/*
 	 * If we just follow the lock chain for deadlock detection, no
 	 * need to do all the requeue operations. To avoid a truckload
 	 * of conditionals around the various places below, just do the
 	 * minimum chain walk checks.
 	 */
+  /*
+   * 如果我们只是按照lock chain进行死锁检测，就不需要执行所有的重新排队操作。
+   * 为了避免在下面的不同地方出现一卡车的条件语句，只需要做最少的链式检查
+   */
 	if (!requeue) {
 		/*
 		 * No requeue[7] here. Just release @task [8]
