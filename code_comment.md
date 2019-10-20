@@ -297,6 +297,7 @@ takeit:
 
 本函数主要作用：
 1）插入waiter链。
+
 2）决定是否进行PI Chain
 
 ```
@@ -331,7 +332,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 	 * situation.
 	 */
   /*
-   * 如果当前Task已经是owner了，死锁
+   * 如果当前Task已经是owner了，死锁,比如：重复调用rt_mutex_lock
    */
 	if (owner == task)
 		return -EDEADLK;
@@ -340,36 +341,73 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
    * 进入临界区，需要修改task的内容，调用task->pi_lock
    */
 	raw_spin_lock_irqsave(&task->pi_lock, flags);
+
+  /*
+   * Boost当前Task的prio，并将本Task对应的waiter进行初始化
+   */
 	__rt_mutex_adjust_prio(task);
 	waiter->task = task;
 	waiter->lock = lock;
 	waiter->prio = task->prio;
 
+  /*
+   * 如果要获取的lock有waiter，则获取top_waiter(应该是暂存),然后讲当前Task的waiter入lock的waiter队
+   */
 	/* Get the top priority waiter on the lock */
 	if (rt_mutex_has_waiters(lock))
 		top_waiter = rt_mutex_top_waiter(lock);
 	rt_mutex_enqueue(lock, waiter);
 
+  /*
+   * 当前Task被对应的waiter block住了，所以记录task->pi_blocked_on。
+   * 如果后面获取lock成功的话，这个pi_blocked_on会被重新设置为NULL
+   */
 	task->pi_blocked_on = waiter;
 
 	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
 
+  /*
+   * 如果要获取的lock的owner为空，则获取lock
+   */
 	if (!owner)
 		return 0;
 
+  /*
+   * 进入当前owner的临界区，调用owner->pi_lock
+   */
 	raw_spin_lock_irqsave(&owner->pi_lock, flags);
+  /*
+   * 如果当前waiter成为lock的top waiter的话，调整owner的PI_waiter.
+   * 因为进程的pi_waiters里面链入的是lock的top waiter
+   */
 	if (waiter == rt_mutex_top_waiter(lock)) {
 		rt_mutex_dequeue_pi(owner, top_waiter);
 		rt_mutex_enqueue_pi(owner, waiter);
 
+   /*
+    * 因为top_waiter更改，所以，需要调整owner的prio
+    */
 		__rt_mutex_adjust_prio(owner);
+
+    /*
+     * 如果在进行对waiter插入各个RB Tree的过程中，要获取lock
+     * 的owner被block了，这个有意思了，需要今次那个PI Chain了，
+     * 因为此刻有更高优先级的Task来了。
+     */
 		if (owner->pi_blocked_on)
 			chain_walk = 1;
 	} else if (rt_mutex_cond_detect_deadlock(waiter, chwalk)) {
+    /*
+     * 当前waiter不是top_waiter，那么做一次死锁检查
+     */
 		chain_walk = 1;
 	}
 
 	/* Store the lock on which owner is blocked or NULL */
+  /*
+   * 获去阻塞owner的lock。如果next_lock存在的话，
+   * 那么需要一步一步往下去调整整个pi chain
+   */
 	next_lock = task_blocked_on_lock(owner);
 
 	raw_spin_unlock_irqrestore(&owner->pi_lock, flags);
@@ -386,10 +424,18 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 	 * so the owner struct is protected by wait_lock.
 	 * Gets dropped in rt_mutex_adjust_prio_chain()!
 	 */
+  /*
+   * 为什么要get呢？因为owner是局部变量
+   */
 	get_task_struct(owner);
 
 	raw_spin_unlock(&lock->wait_lock);
 
+  /*
+   * 啥也不说了，看到快吐血的PI Chain函数来了，切记！切记！切记！
+   * 重要的事情说三句，这里的入参有两个rt_mutex lock 和 两个 task_struct
+   * 一定要把这些参数放到一个显眼的地方看着，要不你不晕，我竟你是条汉子！！！！！！！
+   */
 	res = rt_mutex_adjust_prio_chain(owner, chwalk, lock,
 					 next_lock, waiter, task);
 
