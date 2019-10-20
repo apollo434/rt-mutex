@@ -1085,3 +1085,77 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 }
 
 ```
+
+**__rt_mutex_slowlock**
+
+如同注释中说的那样，本函数就是完成:wait-wake-try-to-take loop
+
+Perform the wait-wake-try-to-take loop
+
+```
+/**
+ * __rt_mutex_slowlock() - Perform the wait-wake-try-to-take loop
+ * @lock:		 the rt_mutex to take
+ * @state:		 the state the task should block in (TASK_INTERRUPTIBLE
+ * 			 or TASK_UNINTERRUPTIBLE)
+ * @timeout:		 the pre-initialized and started timer, or NULL for none
+ * @waiter:		 the pre-initialized rt_mutex_waiter
+ *
+ * lock->wait_lock must be held by the caller.
+ */
+static int __sched
+__rt_mutex_slowlock(struct rt_mutex *lock, int state,
+		    struct hrtimer_sleeper *timeout,
+		    struct rt_mutex_waiter *waiter)
+{
+	int ret = 0;
+
+
+  /*
+   * 当代码进到这里后，说明task_blocks_on_rt_mutex执行完后并没有获得锁
+   */
+  /*
+   * 这里会再次调用try_to_take_rt_mutex,但这次waiter不是NULL
+   */
+	for (;;) {
+		/* Try to acquire the lock: */
+		if (try_to_take_rt_mutex(lock, current, waiter))
+			break;
+
+    /*
+     * 进程是TASK_INTERRUPTIBLE状态的话，即代表可以倍信号打断，
+     * 这里会检查是否有为处理的信号，如果设置了hrtime，则查看是否超时
+     */
+		/*
+		 * TASK_INTERRUPTIBLE checks for signals and
+		 * timeout. Ignored otherwise.
+		 */
+		if (unlikely(state == TASK_INTERRUPTIBLE)) {
+
+			/* Signal pending? */
+			if (signal_pending(current))
+				ret = -EINTR;
+			if (timeout && !timeout->task)
+				ret = -ETIMEDOUT;
+			if (ret)
+				break;
+		}
+
+		raw_spin_unlock(&lock->wait_lock);
+
+		debug_rt_mutex_print_deadlock(waiter);
+
+    /*
+     * schedule 反复进入循环体，知道获取lock才break
+     */
+		schedule();
+
+		raw_spin_lock(&lock->wait_lock);
+		set_current_state(state);
+	}
+
+	__set_current_state(TASK_RUNNING);
+	return ret;
+}
+
+```
