@@ -180,7 +180,8 @@ static int try_to_take_rt_mutex(struct rt_mutex *lock, struct task_struct *task,
   /*
    * 如果有waiter
    * 1）但当前waiter不是top_waiter则获取失败
-   * 2）如果是top_waiter,则将waiter出队，准备获取lock，后续会调用task->pi_blocked_on = NULL;设置当前Task没有被阻塞，同时调用rt_mutex_enqueue_pi来设置pi_waiter RB Tree,和rt_mutex_set_owner(lock, task)设置lock的owner
+   * 2）如果是top_waiter,则将waiter出队，准备获取lock，后续会调用task->pi_blocked_on = NULL;设置当前Task没有被阻塞，
+   * 同时调用rt_mutex_enqueue_pi来设置pi_waiter RB Tree,和rt_mutex_set_owner(lock, task)设置lock的owner
    */
 	if (waiter) {
 		/*
@@ -197,6 +198,9 @@ static int try_to_take_rt_mutex(struct rt_mutex *lock, struct task_struct *task,
 		rt_mutex_dequeue(lock, waiter);
 
 	} else {
+    /*
+     *
+     */
 		/*
 		 * If the lock has waiters already we check whether @task is
 		 * eligible to take over the lock.
