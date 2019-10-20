@@ -293,14 +293,19 @@ takeit:
 ***task_blocks_on_rt_mutex***
 
 这个函数是rtmutex的核心思想所在，包含几个核心函数：
+
 即PI Chain的实现：rt_mutex_adjust_prio_chain 优先级继承
 
 本函数主要作用：
+
 1）插入waiter链。
 
 2）决定是否进行PI Chain
 
-本函数的大体操作过程：
+
+****本函数的大体操作过程:****
+
+----
 
 1. 修改当前Task的信息：
 
@@ -316,19 +321,19 @@ takeit:
 
 3. 如果lock的owner不为空，调整owner的信息：
 
-1）如果当前waiter成为lock的top waiter的话：
+3.1）如果当前waiter成为lock的top waiter的话：
 
-1.1）调整owner的PI_waiter： owner->waiter
+3.1.1）调整owner的PI_waiter： owner->waiter
 
-1.2）调整owner的prio：owner->waiters_leftmost->prio
+3.1.2）调整owner的prio：owner->waiters_leftmost->prio
 
-1.3) 判断在对owner操作的过程中，是否当前owner被新的Task给block住，owner->pi_blocked_on == NULL or not?
+3.1.3) 判断在对owner操作的过程中，是否当前owner被新的Task给block住，owner->pi_blocked_on == NULL or not?
 
-1.3.1) 如果被block住了，则可能需要进行PI Chain.
+3.1.3.1) 如果被block住了，则可能需要进行PI Chain.
 
-1.3.2) 获取阻塞owner的lock，即next_lock。
+3.1.3.2) 获取阻塞owner的lock，即next_lock。
 
-1.3.3）如果1.3.1 & 1.3.2 同时成立，则正式进行PI Chain.
+3.1.3.3）如果3.1.3.1 & 3.1.3.2 同时成立，则正式进行PI Chain.
 
 4. 调用rt_mutex_adjust_prio_chain，进行PI Chain
 
