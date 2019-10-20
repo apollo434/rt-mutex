@@ -493,7 +493,38 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 
 3. 调整Task对应的RB Tree等相关信息.
 
+**NOTE1**
 
+对PI Chain进行walk时，就是遍历PI Chain来调整优先级，直到某个owner并没有被阻塞为止
+
+**NOTE2**
+
+为什么要不阻塞为止？因为向上遍历，在此再次给出一个chain的例子：
+
+```
+
+Example:
+
+   Process:  A, B, C, D, E
+   Mutexes:  L1, L2, L3, L4
+
+   A owns: L1
+           B blocked on L1
+           B owns L2
+                  C blocked on L2
+                  C owns L3
+                         D blocked on L3
+                         D owns L4
+                                E blocked on L4
+
+The chain would be:
+
+   E->L4->D->L3->C->L2->B->L1->A
+```
+
+**NOTE3**
+
+对于PI Chain的walk可能是从底开始，也可能是从中间开始
 ```
 /*
  * Adjust the priority chain. Also used for deadlock detection.
@@ -634,14 +665,21 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
    * 为了明确我把上一个函数中对本函数调用时的入参放到这里：
    * rt_mutex_adjust_prio_chain(owner, chwalk, lock,next_lock, waiter, task);
    * 再次做一个对应：
-   * 本函数入参 ============> 对应的内容
+   * 本函数入参 ============> 对应上一个函数的内容
    * Task ============> owner（current要获取的lock的owner）
    * orig_lock ============> lock (current要获取的lock)
    * next_lock ============> 阻塞owner的lock
    * orig_waiter ============> waiter(current对应的waiter)
    * top_task ============> task(即current)
    */
-	/*
+  /*
+   * 下面是本函数出现的局部变量：
+   * 本函数局部变量 ============> 对应的内容
+   * top_waiter ============> current对应的waiter
+   * waiter ============> current要获取的lock的owner中的waiter
+   * lock ============> current要获取的lock的owner中的waiter记录的阻塞这个owner的lock
+   */
+  	/*
 	 * [2] Get the waiter on which @task is blocked on.
 	 */
 	waiter = task->pi_blocked_on;
