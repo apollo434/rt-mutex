@@ -310,7 +310,27 @@ takeit:
 
 3) 将Task对应的waiter，入要获取的lock的RB Tree.
 
-2.
+4) 将Task：task->pi_blocked_on = waiter
+
+2. 如果要获取的lock的owner为空，则直接获取当前lock。
+
+3. 如果lock的owner不为空，调整owner的信息：
+
+1）如果当前waiter成为lock的top waiter的话：
+
+1.1）调整owner的PI_waiter： owner->waiter
+
+1.2）调整owner的prio：owner->waiters_leftmost->prio
+
+1.3) 判断在对owner操作的过程中，是否当前owner被新的Task给block住，owner->pi_blocked_on == NULL or not?
+
+1.3.1) 如果被block住了，则可能需要进行PI Chain.
+
+1.3.2) 获取阻塞owner的lock，即next_lock。
+
+1.3.3）如果1.3.1 & 1.3.2 同时成立，则正式进行PI Chain.
+
+4. 调用rt_mutex_adjust_prio_chain，进行PI Chain
 
 ```
 /*
