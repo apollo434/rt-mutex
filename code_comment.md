@@ -125,7 +125,18 @@ rt_mutex_slowlock(struct rt_mutex *lock, int state,
 2）lock上有waiter，当前Task没有获取rtmutex lock，并返回0.
 
 整个函数共分下面几种情况：
+1. 如果当前lock有owner，获取失败
+2. 当前lock没有owner
 
+  1）但当前waiter不是top_waiter则获取失败。
+
+  2）如果是top_waiter,则将waiter出队，准备获取lock
+3. 当前lock没有owner，当前Task没有waiter，即task->pi_blocked_on is NULL。
+
+  1）如果当前Task是top_waiter,获取lock。
+  2）如果当前Task不是top_waiter,获取失败。
+
+4. 当前lock没有owner，当前Task没有waiter，即task->pi_blocked_on is NULL。同时当前的lock还没有waiter，即无top_waiter,直接获取lock
 
 ```
 /*
@@ -275,6 +286,116 @@ takeit:
 	rt_mutex_deadlock_account_lock(lock, task);
 
 	return 1;
+}
+
+```
+
+***task_blocks_on_rt_mutex***
+
+这个函数是rtmutex的核心思想所在，包含几个核心函数：
+即PI Chain的实现：rt_mutex_adjust_prio_chain 优先级继承
+
+本函数主要作用：
+1）插入waiter链。
+2）决定是否进行PI Chain
+
+```
+/*
+ * Task blocks on lock.
+ *
+ * Prepare waiter and propagate pi chain
+ *
+ * This must be called with lock->wait_lock held.
+ */
+static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
+				   struct rt_mutex_waiter *waiter,
+				   struct task_struct *task,
+				   enum rtmutex_chainwalk chwalk)
+{
+	struct task_struct *owner = rt_mutex_owner(lock);
+  /*
+   * 此处waiter一直是局部变量，牢记！
+   */
+	struct rt_mutex_waiter *top_waiter = waiter;
+	struct rt_mutex *next_lock;
+	int chain_walk = 0, res;
+	unsigned long flags;
+
+	/*
+	 * Early deadlock detection. We really don't want the task to
+	 * enqueue on itself just to untangle the mess later. It's not
+	 * only an optimization. We drop the locks, so another waiter
+	 * can come in before the chain walk detects the deadlock. So
+	 * the other will detect the deadlock and return -EDEADLOCK,
+	 * which is wrong, as the other waiter is not in a deadlock
+	 * situation.
+	 */
+  /*
+   * 如果当前Task已经是owner了，死锁
+   */
+	if (owner == task)
+		return -EDEADLK;
+
+  /*
+   * 进入临界区，需要修改task的内容，调用task->pi_lock
+   */
+	raw_spin_lock_irqsave(&task->pi_lock, flags);
+	__rt_mutex_adjust_prio(task);
+	waiter->task = task;
+	waiter->lock = lock;
+	waiter->prio = task->prio;
+
+	/* Get the top priority waiter on the lock */
+	if (rt_mutex_has_waiters(lock))
+		top_waiter = rt_mutex_top_waiter(lock);
+	rt_mutex_enqueue(lock, waiter);
+
+	task->pi_blocked_on = waiter;
+
+	raw_spin_unlock_irqrestore(&task->pi_lock, flags);
+
+	if (!owner)
+		return 0;
+
+	raw_spin_lock_irqsave(&owner->pi_lock, flags);
+	if (waiter == rt_mutex_top_waiter(lock)) {
+		rt_mutex_dequeue_pi(owner, top_waiter);
+		rt_mutex_enqueue_pi(owner, waiter);
+
+		__rt_mutex_adjust_prio(owner);
+		if (owner->pi_blocked_on)
+			chain_walk = 1;
+	} else if (rt_mutex_cond_detect_deadlock(waiter, chwalk)) {
+		chain_walk = 1;
+	}
+
+	/* Store the lock on which owner is blocked or NULL */
+	next_lock = task_blocked_on_lock(owner);
+
+	raw_spin_unlock_irqrestore(&owner->pi_lock, flags);
+	/*
+	 * Even if full deadlock detection is on, if the owner is not
+	 * blocked itself, we can avoid finding this out in the chain
+	 * walk.
+	 */
+	if (!chain_walk || !next_lock)
+		return 0;
+
+	/*
+	 * The owner can't disappear while holding a lock,
+	 * so the owner struct is protected by wait_lock.
+	 * Gets dropped in rt_mutex_adjust_prio_chain()!
+	 */
+	get_task_struct(owner);
+
+	raw_spin_unlock(&lock->wait_lock);
+
+	res = rt_mutex_adjust_prio_chain(owner, chwalk, lock,
+					 next_lock, waiter, task);
+
+	raw_spin_lock(&lock->wait_lock);
+
+	return res;
 }
 
 ```
