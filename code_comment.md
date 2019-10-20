@@ -682,6 +682,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
   	/*
 	 * [2] Get the waiter on which @task is blocked on.
 	 */
+
 	waiter = task->pi_blocked_on;
 
 	/*
@@ -693,6 +694,10 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 * reached or the state of the chain has changed while we
 	 * dropped the locks.
 	 */
+   /*
+    * 如果current要获取的lock的owner中的waiter不存在，
+    * 则说明owner已经是top，没有其他Task阻塞它，不需PI Chain
+    */
 	if (!waiter)
 		goto out_unlock_pi;
 
@@ -700,6 +705,9 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 * Check the orig_waiter state. After we dropped the locks,
 	 * the previous owner of the lock might have released the lock.
 	 */
+  /*
+   *
+   */
 	if (orig_waiter && !rt_mutex_owner(orig_lock))
 		goto out_unlock_pi;
 
