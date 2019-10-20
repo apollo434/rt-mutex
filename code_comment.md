@@ -300,6 +300,18 @@ takeit:
 
 2）决定是否进行PI Chain
 
+本函数的大体操作过程：
+
+1. 修改当前Task的信息：
+
+1）调整task->prio, 需要boost，从top_waiter中获取。
+
+2）初始化Task对应的waiter->task/lock/prio.
+
+3) 将Task对应的waiter，入要获取的lock的RB Tree.
+
+2.
+
 ```
 /*
  * Task blocks on lock.
@@ -351,7 +363,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 	waiter->prio = task->prio;
 
   /*
-   * 如果要获取的lock有waiter，则获取top_waiter(应该是暂存),然后讲当前Task的waiter入lock的waiter队
+   * 如果要获取的lock有waiter，则获取top_waiter(暂存,后面用),然后讲当前Task的waiter入lock的waiter队
    */
 	/* Get the top priority waiter on the lock */
 	if (rt_mutex_has_waiters(lock))
@@ -391,7 +403,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 
     /*
      * 如果在进行对waiter插入各个RB Tree的过程中，要获取lock
-     * 的owner被block了，这个有意思了，需要今次那个PI Chain了，
+     * 的owner被block了，这个有意思了，需要调用那个PI Chain了，
      * 因为此刻有更高优先级的Task来了。
      */
 		if (owner->pi_blocked_on)
@@ -405,7 +417,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
 
 	/* Store the lock on which owner is blocked or NULL */
   /*
-   * 获去阻塞owner的lock。如果next_lock存在的话，
+   * 获取阻塞owner的lock。如果next_lock存在的话，
    * 那么需要一步一步往下去调整整个pi chain
    */
 	next_lock = task_blocked_on_lock(owner);
@@ -434,7 +446,7 @@ static int task_blocks_on_rt_mutex(struct rt_mutex *lock,
   /*
    * 啥也不说了，看到快吐血的PI Chain函数来了，切记！切记！切记！
    * 重要的事情说三句，这里的入参有两个rt_mutex lock 和 两个 task_struct
-   * 一定要把这些参数放到一个显眼的地方看着，要不你不晕，我竟你是条汉子！！！！！！！
+   * 一定要把这些参数放到一个显眼的地方看着，要是你不晕，我竟你是条汉子！！！！！！！
    */
 	res = rt_mutex_adjust_prio_chain(owner, chwalk, lock,
 					 next_lock, waiter, task);
