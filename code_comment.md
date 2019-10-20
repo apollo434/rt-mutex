@@ -826,7 +826,7 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 
 ```
 
-**第三部分：调整rtmutex的lock对应的RB Tree等相关信息**
+**第二部分后续：死锁检查善后工作**
 
 ```
 	/*
@@ -846,6 +846,10 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		raw_spin_unlock_irqrestore(&task->pi_lock, flags);
 		put_task_struct(task);
 
+    /*
+     * 如果current要获取的lock的owner对应的waiter记录的阻塞这个
+     * owner的lock的owner，是不存在的，则已经到了PI Chain的结尾，结束，打完收工
+     */
 		/*
 		 * [9] check_exit_conditions_3 protected by lock->wait_lock.
 		 * If there is no owner of the lock, end of chain.
@@ -855,11 +859,19 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 			return 0;
 		}
 
+    /*
+     * 如果存在current要获取的lock的owner对应的waiter记录的
+     * 阻塞这个owner的lock的owner，那么获取这个owner，并进行下一步PI Chain操作
+     */
 		/* [10] Grab the next task, i.e. owner of @lock */
 		task = rt_mutex_owner(lock);
 		get_task_struct(task);
 		raw_spin_lock_irqsave(&task->pi_lock, flags);
 
+    /*
+     * 获取current要获取的lock的owner对应的waiter记录的阻塞
+     * 这个owner的lock的owner中的阻塞它的lock（唉。。。生无可恋）
+     */
 		/*
 		 * No requeue [11] here. We just do deadlock detection.
 		 *
@@ -867,6 +879,11 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		 * itself. Decision is made after dropping the locks
 		 */
 		next_lock = task_blocked_on_lock(task);
+
+    /*
+     * 获取current要获取的lock的owner对应的waiter记录的阻塞这个
+     * owner的lock中的top_waiter.
+     */
 		/*
 		 * Get the top waiter for the next iteration
 		 */
@@ -876,12 +893,26 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 		raw_spin_unlock_irqrestore(&task->pi_lock, flags);
 		raw_spin_unlock(&lock->wait_lock);
 
+    /*
+     * 如果next_lock == NULL,那么就已经到PI Chain的尾部了，
+     * 直接释放刚刚的task局部变量，然后返回
+     * 如果next_lock 不为NULL，那么继续来一遍PI Chain
+     */
 		/* If owner is not blocked, end of chain. */
 		if (!next_lock)
 			goto out_put_task;
 		goto again;
 	}
 
+```
+
+**第三部分：调整rtmutex的lock对应的RB Tree等相关信息**
+
+```
+  /*
+   * 获取current要获取的lock的owner对应的waiter记录的
+   * 阻塞这个owner的lock中的top_waiter，起个名字叫prerequeue_top_waiter
+   */
 	/*
 	 * Store the current top waiter before doing the requeue
 	 * operation on @lock. We need it for the boost/deboost
@@ -889,6 +920,8 @@ static int rt_mutex_adjust_prio_chain(struct task_struct *task,
 	 */
 	prerequeue_top_waiter = rt_mutex_top_waiter(lock);
 
+  /*
+  */
 	/* [7] Requeue the waiter in the lock waiter tree. */
 	rt_mutex_dequeue(lock, waiter);
 	waiter->prio = task->prio;
